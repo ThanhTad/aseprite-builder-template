@@ -4,92 +4,139 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  build-first-time:
-    if: github.event_name == 'push' && github.repository_owner != 'ThanhTad' 
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.set-tag.outputs.tag }}
-      upload_url: ${{ steps.create-release.outputs.upload_url }}
-    steps:
-      - name: Get latest Aseprite tag
-        id: set-tag
-        run: |
-          TAG=$(curl -s https://api.github.com/repos/aseprite/aseprite/releases/latest | jq -r .tag_name)
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Create Draft Release
-        id: create-release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.set-tag.outputs.tag }}
-          release_name: Aseprite ${{ steps.set-tag.outputs.tag }}
-          draft: true
-          prerelease: false
-
   build:
-    needs: build-first-time
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest, macos-latest]
+    
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout Aseprite source
         uses: actions/checkout@v4
         with:
           repository: aseprite/aseprite
-          ref: ${{ needs.build-first-time.outputs.tag }}
+          submodules: recursive
 
-      - name: Init submodules
-        run: git submodule update --init --recursive
+      # --- Setup Environment ---
+
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y g++ clang cmake ninja-build libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ clang cmake ninja-build libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja cmake
 
-      - name: Download prebuilt Skia (m124 latest)
-        run: |
-          SKIA_OS="Windows"
-          if [ "${{ runner.os }}" = "Linux" ]; then SKIA_OS="Linux"; fi
-          if [ "${{ runner.os }}" = "macOS" ]; then SKIA_OS="Mac"; fi
-          curl -L https://github.com/aseprite/skia/releases/latest/download/Skia-${SKIA_OS}-Release-x64.zip -o skia.zip
-          unzip skia.zip -d deps/skia
+      # --- Skia Setup ---
 
-      - name: CMake configure
+      - name: Cache Skia
+        id: cache-skia
+        uses: actions/cache@v4
+        with:
+          path: deps/skia
+          key: skia-${{ runner.os }}-m124
+
+      - name: Download Skia m124
+        if: steps.cache-skia.outputs.cache-hit != 'true'
         run: |
-          mkdir build
+          SKIA_RELEASE="m124-08a5439a6b"
+          
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-Windows-Release-x64.zip"
+          elif [ "${{ runner.os }}" == "Linux" ]; then
+            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-Linux-Release-x64.zip"
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-macOS-Release-arm64.zip"
+          fi
+
+          echo "Downloading Skia from: $URL"
+          curl -L "$URL" -o skia.zip
+          unzip skia.zip -d deps/skia
+          rm skia.zip
+
+      # --- Build Process ---
+
+      - name: CMake Configure
+        run: |
+          mkdir -p build
           cd build
-          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLAF_BACKEND=skia -DSKIA_DIR=../deps/skia -DSKIA_LIBRARY_DIR=../deps/skia/out/Release-x64
+          
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            SKIA_ARCH="arm64"
+          else
+            SKIA_ARCH="x64"
+          fi
+          
+          ARGS="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DLAF_BACKEND=skia -DSKIA_DIR=../deps/skia -DSKIA_LIBRARY_DIR=../deps/skia/out/Release-${SKIA_ARCH} -G Ninja"
+
+          if [ "${{ runner.os }}" == "macOS" ]; then
+            ARGS="$ARGS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+          fi
+
+          cmake .. $ARGS
 
       - name: Build
         run: cd build && ninja
 
-      - name: Package binary
+      # --- Packaging ---
+
+      - name: Package Aseprite
         run: |
           cd build/bin
-          FILE_NAME="aseprite-${{ needs.build-first-time.outputs.tag }}-${{ runner.os }}"
+          ASE_VER=$(grep -oP 'ASEPRITE_VERSION "\K[^"]+' ../../src/ver/ver.h || echo "dev")
+          PACKAGE_NAME="Aseprite-${ASE_VER}-${{ runner.os }}"
+          
+          mkdir -p package
+          
           if [ "${{ runner.os }}" == "Windows" ]; then
-            zip -r ../../${FILE_NAME}.zip .
+            cp aseprite.exe package/
+            cp -r ../../data package/
+            7z a -tzip "${PACKAGE_NAME}.zip" ./package/*
+            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
+            
           elif [ "${{ runner.os }}" == "macOS" ]; then
-            zip -r ../../${FILE_NAME}.zip Aseprite.app
+            cp -r Aseprite.app package/
+            zip -r "${PACKAGE_NAME}.zip" package/Aseprite.app
+            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
+            
           else
-            tar -czf ../../${FILE_NAME}.tar.gz aseprite
+            cp aseprite package/
+            cp -r ../../data package/
+            tar -czf "${PACKAGE_NAME}.tar.gz" -C package .
+            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.tar.gz" >> $GITHUB_ENV
           fi
-          echo "asset_path=../../${FILE_NAME}.*" >> $GITHUB_ENV
 
-      - name: Upload to Draft Release
-        uses: actions/upload-release-asset@v1
+      # --- Upload Release ---
+
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.ASSET_PATH }}
+          tag_name: latest
+          name: Aseprite Auto-Build
+          body: |
+            Build tự động từ mã nguồn mới nhất.
+            Commit: ${{ github.sha }}
+            Ngày: ${{ steps.date.outputs.date }}
+          draft: false
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ needs.build-first-time.outputs.upload_url }}
-          asset_path: ${{ env.asset_path }}
-          asset_name: ${{ basename(env.asset_path) }}
-          asset_content_type: application/octet-stream
