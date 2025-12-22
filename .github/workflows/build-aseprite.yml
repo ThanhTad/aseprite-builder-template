@@ -67,14 +67,29 @@ jobs:
       - name: Package
         run: |
           cd build/bin
-          ASE_VER=$(grep -oP 'ASEPRITE_VERSION "\K[^"]+' ../../src/ver/ver.h || echo "dev")
+          ASE_VER=$(sed -n 's/#define ASEPRITE_VERSION "\(.*\)"/\1/p' ../../src/ver/ver.h)
+          
+          if [ -z "$ASE_VER" ]; then ASE_VER="custom"; fi
+          
+          echo "Detected Version: $ASE_VER"
           ZIP_NAME="Aseprite-${ASE_VER}-Windows.zip"
           
-          mkdir -p packag
-          cp aseprite.exe package/
-          cp -r ../../data package/
+          mkdir -p package_output
           
-          7z a -tzip "${ZIP_NAME}" ./package/*
+          echo "Checking for aseprite.exe..."
+          if [ -f "aseprite.exe" ]; then
+             cp aseprite.exe package_output/
+          else
+             echo "ERROR: aseprite.exe not found! Build failed?"
+             ls -la
+             exit 1
+          fi
+          
+          cp -r ../../data package_output/data
+          
+          echo "Compressing..."
+          7z a -tzip "${ZIP_NAME}" ./package_output/*
+          
           echo "ASSET_PATH=build/bin/${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Release
