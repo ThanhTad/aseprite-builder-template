@@ -1,0 +1,95 @@
+name: Build and Release Aseprite
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-first-time:
+    if: github.event_name == 'push' && github.repository_owner != 'ThanhTad' 
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set-tag.outputs.tag }}
+      upload_url: ${{ steps.create-release.outputs.upload_url }}
+    steps:
+      - name: Get latest Aseprite tag
+        id: set-tag
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/aseprite/aseprite/releases/latest | jq -r .tag_name)
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create Draft Release
+        id: create-release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.set-tag.outputs.tag }}
+          release_name: Aseprite ${{ steps.set-tag.outputs.tag }}
+          draft: true
+          prerelease: false
+
+  build:
+    needs: build-first-time
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout Aseprite source
+        uses: actions/checkout@v4
+        with:
+          repository: aseprite/aseprite
+          ref: ${{ needs.build-first-time.outputs.tag }}
+
+      - name: Init submodules
+        run: git submodule update --init --recursive
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y g++ clang cmake ninja-build libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja cmake
+
+      - name: Download prebuilt Skia (m124 latest)
+        run: |
+          SKIA_OS="Windows"
+          if [ "${{ runner.os }}" = "Linux" ]; then SKIA_OS="Linux"; fi
+          if [ "${{ runner.os }}" = "macOS" ]; then SKIA_OS="Mac"; fi
+          curl -L https://github.com/aseprite/skia/releases/latest/download/Skia-${SKIA_OS}-Release-x64.zip -o skia.zip
+          unzip skia.zip -d deps/skia
+
+      - name: CMake configure
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLAF_BACKEND=skia -DSKIA_DIR=../deps/skia -DSKIA_LIBRARY_DIR=../deps/skia/out/Release-x64
+
+      - name: Build
+        run: cd build && ninja
+
+      - name: Package binary
+        run: |
+          cd build/bin
+          FILE_NAME="aseprite-${{ needs.build-first-time.outputs.tag }}-${{ runner.os }}"
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            zip -r ../../${FILE_NAME}.zip .
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            zip -r ../../${FILE_NAME}.zip Aseprite.app
+          else
+            tar -czf ../../${FILE_NAME}.tar.gz aseprite
+          fi
+          echo "asset_path=../../${FILE_NAME}.*" >> $GITHUB_ENV
+
+      - name: Upload to Draft Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.build-first-time.outputs.upload_url }}
+          asset_path: ${{ env.asset_path }}
+          asset_name: ${{ basename(env.asset_path) }}
+          asset_content_type: application/octet-stream
