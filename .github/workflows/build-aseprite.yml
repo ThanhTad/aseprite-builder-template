@@ -1,23 +1,16 @@
-name: Build and Release Aseprite
+name: Build Aseprite (Windows Fixed)
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-    
+  build-windows:
+    runs-on: windows-latest
     defaults:
       run:
         shell: bash
@@ -29,115 +22,67 @@ jobs:
           repository: aseprite/aseprite
           submodules: recursive
 
-      # --- Setup Environment ---
-
-      - name: Setup MSVC (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y g++ clang cmake ninja-build libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libfontconfig1-dev
-
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install ninja cmake
-
-      # --- Skia Setup ---
+      - name: Install Ninja
+        run: choco install ninja
 
       - name: Cache Skia
         id: cache-skia
         uses: actions/cache@v4
         with:
           path: deps/skia
-          key: skia-${{ runner.os }}-m124
+          key: skia-windows-m124-08a5439a6b
 
-      - name: Download Skia m124
+      - name: Download Skia (Windows x64)
         if: steps.cache-skia.outputs.cache-hit != 'true'
         run: |
-          SKIA_RELEASE="m124-08a5439a6b"
-          
-          if [ "${{ runner.os }}" == "Windows" ]; then
-            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-Windows-Release-x64.zip"
-          elif [ "${{ runner.os }}" == "Linux" ]; then
-            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-Linux-Release-x64.zip"
-          elif [ "${{ runner.os }}" == "macOS" ]; then
-            URL="https://github.com/aseprite/skia/releases/download/${SKIA_RELEASE}/Skia-macOS-Release-arm64.zip"
-          fi
-
-          echo "Downloading Skia from: $URL"
+          URL="https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Windows-Release-x64.zip"
+          echo "Downloading Skia..."
           curl -L "$URL" -o skia.zip
-
           mkdir -p deps/skia
           unzip skia.zip -d deps/skia
           rm skia.zip
 
-      # --- Build Process ---
-
       - name: CMake Configure
         run: |
+          ROOT_PATH=$(pwd -W)
+          SKIA_PATH="$ROOT_PATH/deps/skia"
+          
+          echo "Using Skia Path: $SKIA_PATH"
+          
           mkdir -p build
           cd build
           
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            SKIA_ARCH="arm64"
-          else
-            SKIA_ARCH="x64"
-          fi
-          
-          ARGS="-DCMAKE_BUILD_TYPE=RelWithDebInfo -DLAF_BACKEND=skia -DSKIA_DIR=../deps/skia -DSKIA_LIBRARY_DIR=../deps/skia/out/Release-${SKIA_ARCH} -G Ninja"
+          cmake .. -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR="$SKIA_PATH" \
+            -DSKIA_LIBRARY_DIR="$SKIA_PATH/out/Release-x64"
 
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            ARGS="$ARGS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
-          fi
-
-          cmake .. $ARGS
-
-      - name: Build
+      - name: Build Aseprite
         run: cd build && ninja
 
-      # --- Packaging ---
-
-      - name: Package Aseprite
+      - name: Package
         run: |
           cd build/bin
           ASE_VER=$(grep -oP 'ASEPRITE_VERSION "\K[^"]+' ../../src/ver/ver.h || echo "dev")
-          PACKAGE_NAME="Aseprite-${ASE_VER}-${{ runner.os }}"
+          ZIP_NAME="Aseprite-${ASE_VER}-Windows.zip"
           
-          mkdir -p package
+          mkdir -p packag
+          cp aseprite.exe package/
+          cp -r ../../data package/
           
-          if [ "${{ runner.os }}" == "Windows" ]; then
-            cp aseprite.exe package/
-            cp -r ../../data package/
-            7z a -tzip "${PACKAGE_NAME}.zip" ./package/*
-            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
-            
-          elif [ "${{ runner.os }}" == "macOS" ]; then
-            cp -r Aseprite.app package/
-            zip -r "${PACKAGE_NAME}.zip" package/Aseprite.app
-            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.zip" >> $GITHUB_ENV
-            
-          else
-            cp aseprite package/
-            cp -r ../../data package/
-            tar -czf "${PACKAGE_NAME}.tar.gz" -C package .
-            echo "ASSET_PATH=build/bin/${PACKAGE_NAME}.tar.gz" >> $GITHUB_ENV
-          fi
-
-      # --- Upload Release ---
+          7z a -tzip "${ZIP_NAME}" ./package/*
+          echo "ASSET_PATH=build/bin/${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
           files: ${{ env.ASSET_PATH }}
-          tag_name: latest
-          name: Aseprite Auto-Build
-          body: |
-            Build tự động từ mã nguồn mới nhất.
-            Commit: ${{ github.sha }}
-            Ngày: ${{ steps.date.outputs.date }}
+          tag_name: latest-windows
+          name: Aseprite Windows Build
           draft: false
           prerelease: false
         env:
