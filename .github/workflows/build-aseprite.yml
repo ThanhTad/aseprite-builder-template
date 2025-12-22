@@ -69,6 +69,8 @@ jobs:
 
           echo "Downloading Skia from: $URL"
           curl -L "$URL" -o skia.zip
+
+          mkdir -p deps/skia
           unzip skia.zip -d deps/skia
           rm skia.zip
 
