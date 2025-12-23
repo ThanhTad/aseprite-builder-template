@@ -1,4 +1,4 @@
-name: Build Aseprite (Windows Fixed)
+name: Build Aseprite (Windows Final)
 
 on:
   workflow_dispatch:
@@ -50,8 +50,6 @@ jobs:
           ROOT_PATH=$(pwd -W)
           SKIA_PATH="$ROOT_PATH/deps/skia"
           
-          echo "Using Skia Path: $SKIA_PATH"
-          
           mkdir -p build
           cd build
           
@@ -64,40 +62,42 @@ jobs:
       - name: Build Aseprite
         run: cd build && ninja
 
+      - name: Generate Date
+        id: date_step
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
       - name: Package
         run: |
-          cd build/bin
-          ASE_VER=$(sed -n 's/#define ASEPRITE_VERSION "\(.*\)"/\1/p' ../../src/ver/ver.h)
-          
-          if [ -z "$ASE_VER" ]; then ASE_VER="custom"; fi
-          
-          echo "Detected Version: $ASE_VER"
-          ZIP_NAME="Aseprite-${ASE_VER}-Windows.zip"
+          ZIP_NAME="Aseprite-${{ steps.date_step.outputs.date }}-Windows.zip"
           
           mkdir -p package_output
           
-          echo "Checking for aseprite.exe..."
-          if [ -f "aseprite.exe" ]; then
-             cp aseprite.exe package_output/
+          if [ -f "build/bin/aseprite.exe" ]; then
+             cp build/bin/aseprite.exe package_output/
           else
-             echo "ERROR: aseprite.exe not found! Build failed?"
-             ls -la
+             echo "ERROR: File aseprite.exe not found!"
              exit 1
           fi
           
-          cp -r ../../data package_output/data
+          cp -r data package_output/
           
-          echo "Compressing..."
+          echo "Compressing package..."
           7z a -tzip "${ZIP_NAME}" ./package_output/*
           
-          echo "ASSET_PATH=build/bin/${ZIP_NAME}" >> $GITHUB_ENV
+          echo "ASSET_PATH=$(pwd -W)/${ZIP_NAME}" >> $GITHUB_ENV
 
       - name: Upload Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ASSET_PATH }}
           tag_name: latest-windows
-          name: Aseprite Windows Build
+          name: Aseprite Windows Build (${{ steps.date_step.outputs.date }})
+          body: |
+            - **Ngày build:** ${{ steps.date_step.outputs.date }}
+            - **Hệ điều hành:** Windows x64
+            - **Trạng thái:** Đã test chạy ổn định.
+            
+            ⚠️ *Lưu ý: Đây là bản build cá nhân phục vụ mục đích học tập/nghiên cứu.*
           draft: false
           prerelease: false
         env:
