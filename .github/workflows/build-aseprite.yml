@@ -1,4 +1,4 @@
-name: Build Aseprite (Windows Final)
+name: Build Aseprite (Windows)
 
 on:
   workflow_dispatch:
